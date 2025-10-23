@@ -31,6 +31,12 @@ async function humanDelay(page, minMs=500, maxMs=1500){
   console.log(`Aguardando ${delay}ms (comportamento humano)...`);
   await page.waitForTimeout(delay);
 }
+async function moveMouseRandomly(page){
+  const x = randomDelay(100, 800);
+  const y = randomDelay(100, 600);
+  await page.mouse.move(x, y, { steps: randomDelay(5, 15) });
+  await page.waitForTimeout(randomDelay(100, 300));
+}
 async function typeHumanLike(field, text, page){
   await field.click();
   await page.waitForTimeout(randomDelay(100, 300));
@@ -214,22 +220,74 @@ async function solve2FA(page){
 async function performLogin(page){
   if(!BASE_URL) throw new Error('BASE_URL não configurada no .env');
   console.log('Abrindo página de login...');
-  await page.goto(BASE_URL,{waitUntil:'domcontentloaded'});
+  await page.goto(BASE_URL,{waitUntil:'networkidle', timeout: 30000});
 
   // Wait for page to fully load with human-like delay
   console.log('Aguardando página carregar completamente...');
-  await humanDelay(page, 2000, 3000);
+  await humanDelay(page, 3000, 5000);
+
+  // Move mouse to simulate human behavior
+  console.log('Simulando movimento do mouse...');
+  await moveMouseRandomly(page);
+  await moveMouseRandomly(page);
+
+  // Check for cookie consent banners and click them
+  console.log('Procurando banners de consentimento de cookies...');
+  const cookieConsentSelectors = [
+    'button:has-text("Aceitar")',
+    'button:has-text("Aceito")',
+    'button:has-text("Concordo")',
+    'button:has-text("OK")',
+    'button:has-text("Accept")',
+    'button:has-text("I agree")',
+    '[id*="cookie" i]:has-text("aceitar")',
+    '[class*="cookie" i]:has-text("aceitar")',
+    '.cookie-accept',
+    '#cookie-accept',
+    '.accept-cookies',
+    '#accept-cookies'
+  ];
+
+  for(const selector of cookieConsentSelectors){
+    try{
+      const btn = page.locator(selector).first();
+      if(await btn.count() > 0 && await btn.isVisible()){
+        console.log(`Banner de cookies encontrado: ${selector}`);
+        await btn.click();
+        await humanDelay(page, 1000, 2000);
+        break;
+      }
+    } catch(e){ /* ignore */ }
+  }
 
   // Verify cookies are being set
-  const cookies = await page.context().cookies();
+  let cookies = await page.context().cookies();
   console.log(`Cookies encontrados: ${cookies.length}`);
   if(cookies.length === 0){
     console.warn('Nenhum cookie definido ainda. Aguardando mais tempo...');
-    await humanDelay(page, 2000, 3000);
+    await humanDelay(page, 3000, 5000);
+    cookies = await page.context().cookies();
+    console.log(`Cookies após espera: ${cookies.length}`);
   }
+
+  // Log cookie details for debugging
+  if(cookies.length > 0){
+    console.log('Cookies encontrados:');
+    cookies.forEach(c => console.log(`  - ${c.name}: ${c.value.substring(0, 20)}...`));
+  } else {
+    console.error('AVISO: Nenhum cookie foi definido! Isso pode causar o erro "Cookie not found"');
+  }
+
+  // Take initial screenshot
+  await ensureDir('out');
+  await page.screenshot({ path: path.join('out','pagina-inicial.png'), fullPage:true });
+  console.log('Screenshot da página inicial: out/pagina-inicial.png');
 
   for(let round=1; round<=3; round++){
     console.log(`Tentativa de login ${round}/3`);
+
+    // Move mouse before interacting
+    await moveMouseRandomly(page);
 
     // Wait before checking for login form
     await humanDelay(page, 500, 1000);
@@ -240,6 +298,9 @@ async function performLogin(page){
 
       // Human delay before starting to type
       await humanDelay(page, 800, 1500);
+
+      // Move mouse to username field area
+      await moveMouseRandomly(page);
 
       const userOk =
         await tryFillByLabel(ctx,/usu[aá]rio/i,process.env.EPROC_USERNAME, page) ||
@@ -257,6 +318,10 @@ async function performLogin(page){
 
       // Human delay between username and password
       await humanDelay(page, 600, 1200);
+
+      // Move mouse
+      await moveMouseRandomly(page);
+
       await ctx.keyboard.press('Tab');
       await page.waitForTimeout(randomDelay(300, 600));
 
@@ -276,6 +341,9 @@ async function performLogin(page){
 
       // Human delay before clicking submit
       await humanDelay(page, 800, 1500);
+
+      // Move mouse to button area
+      await moveMouseRandomly(page);
 
       const clicked = await clickIfExists(ctx,/entrar|acessar|login|continuar/i) || await clickIfExists(ctx,'button[type="submit"]');
       if(!clicked){
@@ -426,8 +494,16 @@ async function main(){
   const browser = await chromium.launch({
     headless: HEADLESS,
     args: [
+      '--disable-blink-features=AutomationControlled',
       '--disable-dev-shm-usage',
-      '--no-sandbox'
+      '--no-sandbox',
+      '--disable-web-security',
+      '--disable-features=IsolateOrigins,site-per-process',
+      '--allow-running-insecure-content',
+      '--disable-setuid-sandbox',
+      '--no-zygote',
+      '--disable-accelerated-2d-canvas',
+      '--disable-gpu'
     ]
   });
 
@@ -435,24 +511,53 @@ async function main(){
 
   const context = await browser.newContext({
     acceptDownloads: true,
-    // se existir, reaproveita sessão logada
-    // storageState: hasState ? storageStatePath : undefined,
     userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     viewport: { width: 1366, height: 850 },
+    deviceScaleFactor: 1,
+    isMobile: false,
+    hasTouch: false,
     locale: 'pt-BR',
     timezoneId: 'America/Sao_Paulo',
-    // Ensure cookies, localStorage, and sessionStorage are enabled
+    permissions: ['cookies'],
     storageState: undefined,
-    // Enable JavaScript (should be on by default, but making it explicit)
     javaScriptEnabled: true,
-    // Accept all cookies
     bypassCSP: false,
-    // Extra HTTP headers
     extraHTTPHeaders: {
-      'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7'
+      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+      'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7',
+      'Accept-Encoding': 'gzip, deflate, br',
+      'Connection': 'keep-alive',
+      'Upgrade-Insecure-Requests': '1',
+      'Sec-Fetch-Dest': 'document',
+      'Sec-Fetch-Mode': 'navigate',
+      'Sec-Fetch-Site': 'none',
+      'Sec-Fetch-User': '?1',
+      'Cache-Control': 'max-age=0'
     }
   });
+
+  // Remove automation markers
   const page = await context.newPage();
+
+  await page.addInitScript(() => {
+    // Overwrite the navigator.webdriver property
+    Object.defineProperty(navigator, 'webdriver', {
+      get: () => false,
+    });
+
+    // Mock chrome object
+    window.chrome = {
+      runtime: {}
+    };
+
+    // Mock permissions
+    const originalQuery = window.navigator.permissions.query;
+    window.navigator.permissions.query = (parameters) => (
+      parameters.name === 'notifications' ?
+        Promise.resolve({ state: Notification.permission }) :
+        originalQuery(parameters)
+    );
+  });
 
   try{
     // Don't navigate here - let performLogin handle the first navigation
