@@ -1,0 +1,12 @@
+node_modules
+auth
+out
+*.png
+auth-state.json
+.env
+node_modules
+auth
+out
+*.png
+auth-state.json
+.env
