@@ -24,19 +24,41 @@ authenticator.options = { step: TOTP_PERIOD, digits: TOTP_DIGITS };
 async function ensureDir(p){ await fs.mkdir(p,{recursive:true}).catch(()=>{}); }
 function ask(q){ const rl=readline.createInterface({input:process.stdin,output:process.stdout}); return new Promise(r=>rl.question(q,a=>{rl.close(); r(a.trim());})); }
 
-async function fillFirstVisible(scope, sels, val){
+// Human-like delays to avoid bot detection
+function randomDelay(min, max){ return Math.floor(Math.random() * (max - min + 1)) + min; }
+async function humanDelay(page, minMs=500, maxMs=1500){
+  const delay = randomDelay(minMs, maxMs);
+  console.log(`Aguardando ${delay}ms (comportamento humano)...`);
+  await page.waitForTimeout(delay);
+}
+async function typeHumanLike(field, text, page){
+  await field.click();
+  await page.waitForTimeout(randomDelay(100, 300));
+  for(const char of text){
+    await field.type(char, { delay: randomDelay(50, 150) });
+  }
+  await page.waitForTimeout(randomDelay(200, 500));
+}
+
+async function fillFirstVisible(scope, sels, val, page){
   for(const sel of sels){
     const list = scope.locator(sel);
     const n = await list.count();
     for(let i=0;i<n;i++){
       const el = list.nth(i);
-      if(await el.isVisible().catch(()=>false)){ await el.fill(val); return true; }
+      if(await el.isVisible().catch(()=>false)){
+        await typeHumanLike(el, val, page);
+        return true;
+      }
     }
   } return false;
 }
-async function tryFillByLabel(scope, rx, val){
+async function tryFillByLabel(scope, rx, val, page){
   const loc = scope.getByLabel(rx).first();
-  if((await loc.count()) && await loc.isVisible().catch(()=>false)){ await loc.fill(val); return true; }
+  if((await loc.count()) && await loc.isVisible().catch(()=>false)){
+    await typeHumanLike(loc, val, page);
+    return true;
+  }
   return false;
 }
 async function clickIfExists(scope, selOrRx){
@@ -68,8 +90,33 @@ async function findOtpContext(page){
   } return null;
 }
 async function isFullyAuthenticated(page){
-  if(await findLoginContext(page)) return false;
-  if(await findOtpContext(page))   return false;
+  // First check for cookie error message
+  const cookieError = await page.locator('text=/cookie.*not.*found/i, text=/sentimos.*muito/i, text=/make.*sure.*cookies.*enabled/i').first().count();
+  if(cookieError > 0){
+    console.error('ERRO: Página de erro de cookies detectada!');
+    return false;
+  }
+
+  // Check if still on login page
+  if(await findLoginContext(page)){
+    console.log('Ainda na página de login');
+    return false;
+  }
+
+  // Check if still on 2FA page
+  if(await findOtpContext(page)){
+    console.log('Ainda na página 2FA');
+    return false;
+  }
+
+  // Additional check: make sure we're not on an error page
+  const errorIndicators = await page.locator('text=/erro/i, text=/error/i, text=/acesso.*negado/i, text=/access.*denied/i').count();
+  if(errorIndicators > 0){
+    console.warn('Possível página de erro detectada');
+    return false;
+  }
+
+  console.log('Verificação: parece estar autenticado');
   return true;
 }
 
@@ -94,11 +141,17 @@ async function solve2FA(page){
 
   console.log('Campo 2FA encontrado, tentando preencher código TOTP...');
 
+  // Human delay before starting 2FA
+  await humanDelay(page, 1000, 2000);
+
   for(let attempt=1; attempt<=TOTP_TRIES; attempt++){
     console.log(`Tentativa 2FA ${attempt}/${TOTP_TRIES}`);
 
     const code = getTotp();
     console.log(`Código TOTP gerado: ${code}`);
+
+    // Human delay before typing code
+    await humanDelay(page, 500, 1000);
 
     // Try to find the OTP field - could be #otp or other selectors
     const field = ctx.locator('#otp').first();
@@ -106,20 +159,25 @@ async function solve2FA(page){
 
     if(fieldExists){
       await field.waitFor({ state: 'visible', timeout: 5000 }).catch(()=>{});
-      await field.fill(code);
+      await typeHumanLike(field, code, page);
       console.log('Código 2FA preenchido');
     } else {
       // Fallback to the otpField found by findOtpContext
-      await otpField.fill(code);
+      await typeHumanLike(otpField, code, page);
       console.log('Código 2FA preenchido (campo alternativo)');
     }
+
+    // Human delay before clicking submit
+    await humanDelay(page, 800, 1500);
 
     // Click submit button or press Enter
     const clicked = await clickIfExists(ctx,/entrar|confirmar|continuar|verificar|submit/i);
     if(!clicked) await ctx.keyboard.press('Enter');
 
-    // Wait for navigation
-    await page.waitForLoadState('networkidle',{timeout:8000}).then(()=>true).catch(()=>false);
+    // Wait for navigation with extra time
+    console.log('Aguardando validação do código 2FA...');
+    await page.waitForLoadState('networkidle',{timeout:12000}).then(()=>true).catch(()=>false);
+    await humanDelay(page, 2000, 3000);
 
     // Check if we're authenticated now
     if(await isFullyAuthenticated(page)){
@@ -158,53 +216,66 @@ async function performLogin(page){
   console.log('Abrindo página de login...');
   await page.goto(BASE_URL,{waitUntil:'domcontentloaded'});
 
-  // Wait a bit for cookies to be set
-  await page.waitForTimeout(1000);
+  // Wait for page to fully load with human-like delay
+  console.log('Aguardando página carregar completamente...');
+  await humanDelay(page, 2000, 3000);
 
   // Verify cookies are being set
   const cookies = await page.context().cookies();
   console.log(`Cookies encontrados: ${cookies.length}`);
   if(cookies.length === 0){
     console.warn('Nenhum cookie definido ainda. Aguardando mais tempo...');
-    await page.waitForTimeout(2000);
+    await humanDelay(page, 2000, 3000);
   }
 
   for(let round=1; round<=3; round++){
     console.log(`Tentativa de login ${round}/3`);
 
+    // Wait before checking for login form
+    await humanDelay(page, 500, 1000);
+
     const ctx = await findLoginContext(page);
     if(ctx){
       console.log('Formulário de login encontrado, preenchendo credenciais...');
 
+      // Human delay before starting to type
+      await humanDelay(page, 800, 1500);
+
       const userOk =
-        await tryFillByLabel(ctx,/usu[aá]rio/i,process.env.EPROC_USERNAME) ||
+        await tryFillByLabel(ctx,/usu[aá]rio/i,process.env.EPROC_USERNAME, page) ||
         await fillFirstVisible(ctx,[
           'input[name="username"]:not([type="hidden"]):visible',
           '#username:visible','input[autocomplete="username"]',
           'input[aria-label*="usu" i]:visible','input[placeholder*="usu" i]:visible',
           'input[type="text"]:visible'
-        ], process.env.EPROC_USERNAME);
+        ], process.env.EPROC_USERNAME, page);
       if(!userOk){
         console.error('Campo de usuário não encontrado/visível.');
         throw new Error('Campo de usuário não encontrado/visível.');
       }
       console.log('Usuário preenchido');
 
-      await ctx.keyboard.press('Tab'); await page.waitForTimeout(150);
+      // Human delay between username and password
+      await humanDelay(page, 600, 1200);
+      await ctx.keyboard.press('Tab');
+      await page.waitForTimeout(randomDelay(300, 600));
 
       const passOk =
-        await tryFillByLabel(ctx,/senha/i,process.env.EPROC_PASSWORD) ||
+        await tryFillByLabel(ctx,/senha/i,process.env.EPROC_PASSWORD, page) ||
         await fillFirstVisible(ctx,[
           'input[type="password"]:not([autocomplete="one-time-code"]):visible',
           'input[name="password"]:not([autocomplete="one-time-code"]):visible',
           'input[autocomplete="current-password"]',
           'input[aria-label*="senh" i]:visible','input[placeholder*="senh" i]:visible'
-        ], process.env.EPROC_PASSWORD);
+        ], process.env.EPROC_PASSWORD, page);
       if(!passOk){
         console.error('Campo de senha não encontrado/visível.');
         throw new Error('Campo de senha não encontrado/visível.');
       }
       console.log('Senha preenchida');
+
+      // Human delay before clicking submit
+      await humanDelay(page, 800, 1500);
 
       const clicked = await clickIfExists(ctx,/entrar|acessar|login|continuar/i) || await clickIfExists(ctx,'button[type="submit"]');
       if(!clicked){
@@ -214,13 +285,25 @@ async function performLogin(page){
         console.log('Botão de login clicado');
       }
 
-      await page.waitForLoadState('networkidle',{timeout:15000}).catch(()=>{});
+      // Wait for navigation with extra time
+      console.log('Aguardando navegação após login...');
+      await page.waitForLoadState('networkidle',{timeout:20000}).catch(()=>{});
+      await humanDelay(page, 2000, 3000);
     } else {
       console.log('Nenhum formulário de login visível nesta página');
     }
 
+    // Take screenshot after login attempt
+    await ensureDir('out');
+    await page.screenshot({ path: path.join('out',`apos-login-tentativa-${round}.png`), fullPage:true });
+    console.log(`Screenshot salvo: out/apos-login-tentativa-${round}.png`);
+
     // Try to solve 2FA if it appears
     await solve2FA(page);
+
+    // Take screenshot after 2FA
+    await page.screenshot({ path: path.join('out',`apos-2fa-tentativa-${round}.png`), fullPage:true });
+    console.log(`Screenshot salvo: out/apos-2fa-tentativa-${round}.png`);
 
     // Check if we're fully authenticated now
     if(await isFullyAuthenticated(page)){
