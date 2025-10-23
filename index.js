@@ -135,6 +135,17 @@ async function performLogin(page){
   console.log('Abrindo página de login...');
   await page.goto(BASE_URL,{waitUntil:'domcontentloaded'});
 
+  // Wait a bit for cookies to be set
+  await page.waitForTimeout(1000);
+
+  // Verify cookies are being set
+  const cookies = await page.context().cookies();
+  console.log(`Cookies encontrados: ${cookies.length}`);
+  if(cookies.length === 0){
+    console.warn('Nenhum cookie definido ainda. Aguardando mais tempo...');
+    await page.waitForTimeout(2000);
+  }
+
   for(let round=1; round<=3; round++){
     const ctx = await findLoginContext(page);
     if(ctx){
@@ -221,34 +232,42 @@ async function gotoPrazos(page){
 
 async function main(){
   await ensureDir('out');
-  const browser = await chromium.launch({ headless: true, args: [
+  const browser = await chromium.launch({
+    headless: HEADLESS,
+    args: [
       '--disable-dev-shm-usage',
-      '--no-sandbox',
-      '--disable-features=BlockThirdPartyCookies,SameSiteByDefaultCookies,CookiesWithoutSameSiteMustBeSecure'
-    ] });
+      '--no-sandbox'
+    ]
+  });
 
   const reuse = false;// !FORCE_LOGIN && await fs.stat(path.join('auth','auth-state.json')).catch(()=>null);
-  // const context = await browser.newContext();
 
   const context = await browser.newContext({
     acceptDownloads: true,
     // se existir, reaproveita sessão logada
     // storageState: hasState ? storageStatePath : undefined,
-    userAgent: `EPROC-Scraper/0.1 (Playwright)`,
+    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     viewport: { width: 1366, height: 850 },
+    locale: 'pt-BR',
+    timezoneId: 'America/Sao_Paulo',
+    // Ensure cookies, localStorage, and sessionStorage are enabled
+    storageState: undefined,
+    // Enable JavaScript (should be on by default, but making it explicit)
+    javaScriptEnabled: true,
+    // Accept all cookies
+    bypassCSP: false,
+    // Extra HTTP headers
+    extraHTTPHeaders: {
+      'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7'
+    }
   });
   const page = await context.newPage();
 
   try{
-    await page.goto(BASE_URL,{waitUntil:'domcontentloaded'}).catch(()=>{});
-    if(!await isFullyAuthenticated(page)){
-      console.log(reuse ? 'Sessão salva não é válida. Refazendo login...' : 'Iniciando login...');
-      await performLogin(page);
-    } else {
-      console.log('Já autenticado.');
-      // await ensureDir('auth');
-      // await page.context().storageState({ path: path.join('auth','auth-state.json') });
-    }
+    // Don't navigate here - let performLogin handle the first navigation
+    // This avoids potential cookie issues from multiple navigations
+    console.log('Iniciando login...');
+    await performLogin(page);
 
     debugger;
 
