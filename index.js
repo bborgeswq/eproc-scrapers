@@ -227,6 +227,12 @@ async function performLogin(page){
       await ensureDir('auth');
       await page.context().storageState({ path: path.join('auth','auth-state.json') });
       console.log('Login concluído com sucesso! Sessão salva em auth/auth-state.json');
+
+      // Take screenshot of logged-in page for debugging
+      await ensureDir('out');
+      await page.screenshot({ path: path.join('out','login-sucesso.png'), fullPage:true });
+      console.log('Screenshot da página logada salva em out/login-sucesso.png');
+
       return;
     }
 
@@ -246,38 +252,87 @@ async function performLogin(page){
 
 async function gotoPrazos(page){
   console.log('Indo para "Prazos"...');
-  if(!(await isFullyAuthenticated(page))) throw new Error('Ainda em login/2FA. Autentique antes de navegar.');
 
+  // Take screenshot before trying to navigate
+  await ensureDir('out');
+  await page.screenshot({ path: path.join('out','antes-prazos.png'), fullPage:true });
+  console.log('Screenshot da página antes de buscar Prazos salva em out/antes-prazos.png');
+
+  // Wait a bit for page to fully load
+  await page.waitForTimeout(2000);
+
+  if(!(await isFullyAuthenticated(page))) {
+    console.error('Ainda em tela de login/2FA');
+    await page.screenshot({ path: path.join('out','still-in-login.png'), fullPage:true });
+    throw new Error('Ainda em login/2FA. Autentique antes de navegar.');
+  }
+
+  console.log('Procurando campo de pesquisa...');
   let search = page.getByPlaceholder(/Pesquisar/i).first();
   if(!await search.count()){
+    console.log('Campo de pesquisa não encontrado na página principal, procurando em frames...');
     for(const f of page.frames()){
       const s=f.getByPlaceholder(/Pesquisar/i).first();
-      if(await s.count()){ search=s; break; }
+      if(await s.count()){
+        search=s;
+        console.log('Campo de pesquisa encontrado em frame');
+        break;
+      }
     }
+  } else {
+    console.log('Campo de pesquisa encontrado na página principal');
   }
 
   if(await search.count()){
-    await search.click(); await search.fill('prazos'); await page.waitForTimeout(700);
+    console.log('Tentando buscar por "prazos" usando o campo de pesquisa...');
+    await search.click();
+    await search.fill('prazos');
+    await page.waitForTimeout(700);
 
     let ok=false; const scopes=[page, ...page.frames()];
     for(const sc of scopes){
       ok = await sc.getByRole('link',{name:/prazos/i}).first().click().then(()=>true).catch(()=>false);
-      if(ok) break;
+      if(ok) {
+        console.log('Link de Prazos clicado (por role=link)');
+        break;
+      }
       ok = await sc.getByText(/prazos/i,{exact:false}).first().click().then(()=>true).catch(()=>false);
-      if(ok) break;
+      if(ok) {
+        console.log('Link de Prazos clicado (por texto)');
+        break;
+      }
     }
-    if(!ok) await search.press('Enter');
+    if(!ok) {
+      console.log('Nenhum link encontrado, pressionando Enter no campo de pesquisa');
+      await search.press('Enter');
+    }
   } else {
+    console.log('Campo de pesquisa não encontrado, procurando link direto de Prazos...');
     const scopes=[page, ...page.frames()];
     let clicked=false;
     for(const sc of scopes){
       clicked = await sc.getByText(/Prazos/i).first().click().then(()=>true).catch(()=>false);
-      if(clicked) break;
+      if(clicked) {
+        console.log('Link direto de Prazos encontrado e clicado');
+        break;
+      }
     }
-    if(!clicked) throw new Error('Não achei "Pesquisar no Menu" nem item direto de Prazos.');
+    if(!clicked) {
+      console.error('Não consegui encontrar Prazos de nenhuma forma');
+      await page.screenshot({ path: path.join('out','prazos-nao-encontrado.png'), fullPage:true });
+      console.log('Screenshot salvo em out/prazos-nao-encontrado.png');
+
+      // Log current URL and page title for debugging
+      console.log('URL atual:', page.url());
+      const title = await page.title();
+      console.log('Título da página:', title);
+
+      throw new Error('Não achei "Pesquisar no Menu" nem item direto de Prazos. Veja out/prazos-nao-encontrado.png');
+    }
   }
 
-  await page.waitForLoadState('networkidle');
+  await page.waitForLoadState('networkidle').catch(()=>{});
+  await page.waitForTimeout(1000);
   await ensureDir('out');
   await page.screenshot({ path: path.join('out','prazos-landing.png'), fullPage:true });
   console.log('Tela de Prazos aberta. Screenshot em out/prazos-landing.png');
