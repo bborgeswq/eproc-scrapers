@@ -85,49 +85,72 @@ function genTotp(secret, stepOffset=0){
 }
 
 async function solve2FA(page){
-  const found = await findOtpContext(page); if(!found) return;
+  const found = await findOtpContext(page);
+  if(!found) {
+    console.log('Nenhum campo 2FA encontrado - pode já estar autenticado');
+    return;
+  }
   const { ctx, otpField } = found;
 
+  console.log('Campo 2FA encontrado, tentando preencher código TOTP...');
+
   for(let attempt=1; attempt<=TOTP_TRIES; attempt++){
+    console.log(`Tentativa 2FA ${attempt}/${TOTP_TRIES}`);
 
-    const code = getTotp()
-      //debugger;
-      // for(const code of codes){
-      //await otpField.fill(code);
-      //
+    const code = getTotp();
+    console.log(`Código TOTP gerado: ${code}`);
 
-      // input id #otp
-      // get element by input id
-      // then fill it with code
-      const field = ctx.locator('#otp').first();
+    // Try to find the OTP field - could be #otp or other selectors
+    const field = ctx.locator('#otp').first();
+    const fieldExists = await field.count() > 0;
 
-        await field.waitFor({ state: 'visible', timeout: 5000 });
-        await field.fill(code);
+    if(fieldExists){
+      await field.waitFor({ state: 'visible', timeout: 5000 }).catch(()=>{});
+      await field.fill(code);
+      console.log('Código 2FA preenchido');
+    } else {
+      // Fallback to the otpField found by findOtpContext
+      await otpField.fill(code);
+      console.log('Código 2FA preenchido (campo alternativo)');
+    }
 
-      await (clickIfExists(ctx,/entrar|confirmar|continuar|verificar|submit/i) || ctx.keyboard.press('Enter'));
+    // Click submit button or press Enter
+    const clicked = await clickIfExists(ctx,/entrar|confirmar|continuar|verificar|submit/i);
+    if(!clicked) await ctx.keyboard.press('Enter');
 
-         // page.wait
-         debugger;
-      // debugger;
-      const ok = await page.waitForLoadState('networkidle',{timeout:4000}).then(()=>true).catch(()=>false);
+    // Wait for navigation
+    await page.waitForLoadState('networkidle',{timeout:8000}).then(()=>true).catch(()=>false);
 
-
+    // Check if we're authenticated now
+    if(await isFullyAuthenticated(page)){
+      console.log('2FA aceito! Autenticado com sucesso.');
       return;
-      // debugger;
+    }
 
-      // if(ok && await isFullyAuthenticated(page)){ accepted = true; break; }
+    // Check for error message
+    const erro = await ctx.locator('text=/c[oó]digo.*inv[aá]lido/i').first().count();
+    if(erro){
+      console.warn(`Tentativa ${attempt} falhou - código inválido`);
+      // Wait for next TOTP cycle if not the last attempt
+      if(attempt < TOTP_TRIES){
+        const waitTime = msToNextStep();
+        console.log(`Aguardando ${Math.ceil(waitTime/1000)}s para próximo código...`);
+        await page.waitForTimeout(waitTime);
+      }
+      continue;
+    }
 
-      //const erro = await ctx.locator('text=/c[oó]digo.*inv[aá]lido/i').first().count();
-      //if(erro){ await otpField.click().catch(()=>{}); continue; }
-
-      // debugger;
-      //if(await isFullyAuthenticated(page)){ accepted = true; break; }
-    // }
-
-   // if(accepted) return;
-   // await ctx.waitForTimeout(msToNextStep());
+    // If no error but still not authenticated, might need more time
+    console.log('Aguardando mais tempo para verificar 2FA...');
+    await page.waitForTimeout(2000);
+    if(await isFullyAuthenticated(page)){
+      console.log('2FA aceito! Autenticado com sucesso.');
+      return;
+    }
   }
-  //throw new Error('2FA falhou após várias tentativas. Revise TOTP_SECRET/hora/TOTP_OFFSET_MS.');
+
+  console.error('2FA falhou após várias tentativas');
+  throw new Error('2FA falhou após várias tentativas. Revise TOTP_SECRET/hora/TOTP_OFFSET_MS.');
 }
 
 async function performLogin(page){
@@ -147,8 +170,12 @@ async function performLogin(page){
   }
 
   for(let round=1; round<=3; round++){
+    console.log(`Tentativa de login ${round}/3`);
+
     const ctx = await findLoginContext(page);
     if(ctx){
+      console.log('Formulário de login encontrado, preenchendo credenciais...');
+
       const userOk =
         await tryFillByLabel(ctx,/usu[aá]rio/i,process.env.EPROC_USERNAME) ||
         await fillFirstVisible(ctx,[
@@ -157,7 +184,11 @@ async function performLogin(page){
           'input[aria-label*="usu" i]:visible','input[placeholder*="usu" i]:visible',
           'input[type="text"]:visible'
         ], process.env.EPROC_USERNAME);
-      if(!userOk) throw new Error('Campo de usuário não encontrado/visível.');
+      if(!userOk){
+        console.error('Campo de usuário não encontrado/visível.');
+        throw new Error('Campo de usuário não encontrado/visível.');
+      }
+      console.log('Usuário preenchido');
 
       await ctx.keyboard.press('Tab'); await page.waitForTimeout(150);
 
@@ -169,23 +200,45 @@ async function performLogin(page){
           'input[autocomplete="current-password"]',
           'input[aria-label*="senh" i]:visible','input[placeholder*="senh" i]:visible'
         ], process.env.EPROC_PASSWORD);
-      if(!passOk) throw new Error('Campo de senha não encontrado/visível.');
+      if(!passOk){
+        console.error('Campo de senha não encontrado/visível.');
+        throw new Error('Campo de senha não encontrado/visível.');
+      }
+      console.log('Senha preenchida');
 
       const clicked = await clickIfExists(ctx,/entrar|acessar|login|continuar/i) || await clickIfExists(ctx,'button[type="submit"]');
-      if(!clicked) await ctx.keyboard.press('Enter');
+      if(!clicked){
+        console.log('Botão de login não encontrado, pressionando Enter');
+        await ctx.keyboard.press('Enter');
+      } else {
+        console.log('Botão de login clicado');
+      }
+
       await page.waitForLoadState('networkidle',{timeout:15000}).catch(()=>{});
+    } else {
+      console.log('Nenhum formulário de login visível nesta página');
     }
 
-    // debugger;
+    // Try to solve 2FA if it appears
     await solve2FA(page);
-    // if(await isFullyAuthenticated(page)){
-      // await ensureDir('auth');
-      // await page.context().storageState({ path: path.join('auth','auth-state.json') });
-      // console.log('Login concluído e sessão salva em auth/auth-state.json');
-      //return;
-    // }
+
+    // Check if we're fully authenticated now
+    if(await isFullyAuthenticated(page)){
+      await ensureDir('auth');
+      await page.context().storageState({ path: path.join('auth','auth-state.json') });
+      console.log('Login concluído com sucesso! Sessão salva em auth/auth-state.json');
+      return;
+    }
+
+    // If not authenticated yet, wait a bit and try again
+    if(round < 3){
+      console.log('Ainda não autenticado, aguardando antes da próxima tentativa...');
+      await page.waitForTimeout(2000);
+    }
   }
 
+  // If we got here, all attempts failed
+  console.error('Falha na autenticação após 3 tentativas');
   await ensureDir('out');
   await page.screenshot({ path: 'out/login-falhou.png', fullPage:true }).catch(()=>{});
   throw new Error('Não consegui autenticar. Veja out/login-falhou.png');
